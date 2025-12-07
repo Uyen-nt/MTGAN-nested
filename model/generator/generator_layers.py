@@ -161,7 +161,7 @@ class SmoothCondition_HOPE(nn.Module):
         # ------------------------
         # 4) Add learned embedding for target ICD code
         # ------------------------
-        t = self.target_embed(target_codes)    # (B, D)
+        t = self.target_embed(target_codes.to(x.device))    # (B, D)
         t = t.unsqueeze(1).expand(B, T, self.latent_dim)
 
         h_cond = h_cms + t
