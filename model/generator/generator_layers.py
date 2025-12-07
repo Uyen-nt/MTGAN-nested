@@ -51,9 +51,14 @@ class SmoothCondition(nn.Module):
 
 
 
-# ================================================================
-# 1. Mini Self-Attention (nhẹ để lấy context)
-# ================================================================
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+# ================================
+# 1. MiniSelfAttention on latent D
+# ================================
 class MiniSelfAttention(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -64,24 +69,16 @@ class MiniSelfAttention(nn.Module):
         self.proj = nn.Linear(dim, dim)
 
     def forward(self, x):
-        # x: (B, T, V)
-        q = self.to_q(x)       # (B, T, V)
-        k = self.to_k(x)       # (B, T, V)
-        v = self.to_v(x)       # (B, T, V)
-
-        # attention score: (B, T, T)
+        q, k, v = self.to_q(x), self.to_k(x), self.to_v(x)
         attn = torch.einsum("btd, bTd -> btT", q, k) * self.scale
         attn = attn.softmax(dim=-1)
-
-        # weighted sum
         out = torch.einsum("btT, bTd -> btd", attn, v)
         return self.proj(out)
 
 
-
-# ================================================================
-# 2. CMS-lite: học "conditional matrix" theo dạng MLP
-# ================================================================
+# ================================
+# 2. CMS-lite on latent D (FAST)
+# ================================
 class CMSLite(nn.Module):
     def __init__(self, dim, hidden=4):
         super().__init__()
@@ -96,9 +93,9 @@ class CMSLite(nn.Module):
         return self.net(x)
 
 
-# ================================================================
-# 3. SelfModifier-lite
-# ================================================================
+# ================================
+# 3. Modifier-lite on latent D
+# ================================
 class SelfModifierLite(nn.Module):
     def __init__(self, dim, hidden=4):
         super().__init__()
@@ -109,55 +106,80 @@ class SelfModifierLite(nn.Module):
             nn.Linear(h, dim)
         )
 
-    def forward(self, context, error_signal):
-        concat = torch.cat([context, error_signal], dim=-1)
+    def forward(self, context, cond):
+        concat = torch.cat([context, cond], dim=-1)
         return self.net(concat)
 
 
-# ================================================================
-# 4. SmoothCondition_HOPE — phiên bản HOPE-lite
-# ================================================================
+# ======================================================
+# 4. SmoothCondition_HOPE_FAST (with Projection V <-> D)
+# ======================================================
 class SmoothCondition_HOPE(nn.Module):
-    def __init__(self, code_num, attention_dim=4, hidden=4):
+    def __init__(self, code_num, latent_dim=256, hidden=4):
         super().__init__()
-        self.code_num = code_num
 
-        self.attn = MiniSelfAttention(code_num)
-        self.cms = CMSLite(code_num, hidden=hidden)
-        self.modifier = SelfModifierLite(code_num, hidden=hidden)
+        self.code_num = code_num
+        self.latent_dim = latent_dim
+
+        # Project ICD vector V → latent D
+        self.project_down = nn.Linear(code_num, latent_dim)
+
+        # Project back latent D → V
+        self.project_up = nn.Linear(latent_dim, code_num)
+
+        # HOPE-lite modules now run on D, not V
+        self.attn = MiniSelfAttention(latent_dim)
+        self.cms = CMSLite(latent_dim, hidden)
+        self.modifier = SelfModifierLite(latent_dim, hidden)
+
+        # Target code embedding (on latent)
+        self.target_embed = nn.Embedding(code_num, latent_dim)
 
     def forward(self, x, lens, target_codes):
         """
         x: (B, T, V)
-        lens: (B,)
         target_codes: (B,)
         """
 
         B, T, V = x.shape
 
-        # ----------------------------------------------------------
-        # 1. Self-attention để lấy context semantic
-        # ----------------------------------------------------------
-        attn_out = self.attn(x)  # (B, T, V)
+        # ------------------------
+        # 1) Project V → D
+        # ------------------------
+        h = self.project_down(x)   # (B, T, D)
 
-        # ----------------------------------------------------------
-        # 2. CMS-lite dựa trên target_codes:
-        #    tạo embedding chỉ số → điều kiện ICD học được
-        # ----------------------------------------------------------
-        target_embed = F.one_hot(target_codes, num_classes=V).float().to(x.device)  # (B, V)
-        target_embed = target_embed.unsqueeze(1).expand(B, T, V)        # (B, T, V)
+        # ------------------------
+        # 2) Attention on latent D
+        # ------------------------
+        h_attn = self.attn(h)
 
-        cms_out = self.cms(attn_out) + target_embed    # (B, T, V)
+        # ------------------------
+        # 3) CMS on latent D
+        # ------------------------
+        h_cms = self.cms(h_attn)
 
-        # ----------------------------------------------------------
-        # 3. SelfModifier-lite: học hiệu chỉnh boost theo context
-        # ----------------------------------------------------------
-        modifier = self.modifier(attn_out, cms_out)    # (B, T, V)
+        # ------------------------
+        # 4) Add learned embedding for target ICD code
+        # ------------------------
+        t = self.target_embed(target_codes)    # (B, D)
+        t = t.unsqueeze(1).expand(B, T, self.latent_dim)
 
-        # ----------------------------------------------------------
-        # 4. Kết hợp lại
-        # ----------------------------------------------------------
-        out = x + cms_out + modifier
-        out = torch.clamp(out, 0.0, 1.0)
+        h_cond = h_cms + t
+
+        # ------------------------
+        # 5) Modifier
+        # ------------------------
+        h_mod = self.modifier(h_attn, h_cond)
+
+        # ------------------------
+        # 6) Residual combine
+        # ------------------------
+        h_out = h + h_cond + h_mod
+
+        # ------------------------
+        # 7) Project back to ICD V
+        # ------------------------
+        out = self.project_up(h_out)
+        out = out.sigmoid()  # same output type as original
 
         return out
