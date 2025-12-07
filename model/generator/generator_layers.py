@@ -55,32 +55,28 @@ class SmoothCondition(nn.Module):
 # 1. Mini Self-Attention (nhẹ để lấy context)
 # ================================================================
 class MiniSelfAttention(nn.Module):
-    def __init__(self, dim, heads=4):
+    def __init__(self, dim):
         super().__init__()
-        self.heads = heads
-        self.dim = dim
-
         self.to_q = nn.Linear(dim, dim, bias=False)
         self.to_k = nn.Linear(dim, dim, bias=False)
         self.to_v = nn.Linear(dim, dim, bias=False)
+        self.scale = dim ** -0.5
         self.proj = nn.Linear(dim, dim)
 
     def forward(self, x):
         # x: (B, T, V)
-        B, T, V = x.shape
-        H = self.heads
-        D = V // H
+        q = self.to_q(x)       # (B, T, V)
+        k = self.to_k(x)       # (B, T, V)
+        v = self.to_v(x)       # (B, T, V)
 
-        q = self.to_q(x).view(B, T, H, D)
-        k = self.to_k(x).view(B, T, H, D)
-        v = self.to_v(x).view(B, T, H, D)
+        # attention score: (B, T, T)
+        attn = torch.einsum("btd, bTd -> btT", q, k) * self.scale
+        attn = attn.softmax(dim=-1)
 
-        scores = torch.einsum("bthd, bThd -> bhtT", q, k) / (D ** 0.5)
-        attn = scores.softmax(dim=-1)
-
-        out = torch.einsum("bhtT, bThd -> bthd", attn, v)
-        out = out.reshape(B, T, V)
+        # weighted sum
+        out = torch.einsum("btT, bTd -> btd", attn, v)
         return self.proj(out)
+
 
 
 # ================================================================
@@ -126,7 +122,7 @@ class SmoothCondition_HOPE(nn.Module):
         super().__init__()
         self.code_num = code_num
 
-        self.attn = MiniSelfAttention(code_num, heads=4)
+        self.attn = MiniSelfAttention(code_num)
         self.cms = CMSLite(code_num, hidden=hidden)
         self.modifier = SelfModifierLite(code_num, hidden=hidden)
 
