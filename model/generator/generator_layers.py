@@ -144,7 +144,7 @@ class SmoothCondition_HOPE(nn.Module):
         # 2. CMS-lite dựa trên target_codes:
         #    tạo embedding chỉ số → điều kiện ICD học được
         # ----------------------------------------------------------
-        target_embed = F.one_hot(target_codes, num_classes=V).float()  # (B, V)
+        target_embed = F.one_hot(target_codes, num_classes=V).float().to(x.device)  # (B, V)
         target_embed = target_embed.unsqueeze(1).expand(B, T, V)        # (B, T, V)
 
         cms_out = self.cms(attn_out) + target_embed    # (B, T, V)
