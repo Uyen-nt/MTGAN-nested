@@ -2,7 +2,8 @@ import torch
 
 from model.base_model import BaseModel
 from model.utils import sequence_mask
-from .generator_layers import GRU, SmoothCondition
+#from .generator_layers import GRU, SmoothCondition
+from .generator_layers import GRU, SmoothCondition_HOPE as SmoothCondition
 
 
 class Generator(BaseModel):
